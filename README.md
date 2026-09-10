@@ -105,6 +105,47 @@ somewhere other than its feet.
 
 Pitch is clamped just short of straight down and just above the horizon.
 
+## Parity with the canvas build
+
+Sixty trials, `teamplayer` wolves against a `defender` deer, 5v1, seeds
+20260910-69, both run headless. `./test.sh --parity 60` here and
+`node tools/parity.mjs 60 20260910` there print these fields in this order.
+
+| | Godot | JS | |
+|---|---|---|---|
+| deer win rate | 0.767 | 0.750 | +2% |
+| kill rate | 0.233 | 0.250 | −7% |
+| mean hunt (ticks) | 1440 | 1526 | −6% |
+| mean chase (ticks) | 1223 | 1308 | −6% |
+| deer energy at the outcome | 0.236 | 0.218 | +8% |
+| pack energy at the outcome | 0.962 | 0.967 | −0.5% |
+| wolf trot / gallop share | 0.158 / 0.831 | 0.149 / 0.841 | within 1 pp |
+| deer gallop / sprint / bound share | 0.858 / 0.042 / 0.035 | 0.859 / 0.040 / 0.033 | within 0.3 pp |
+| decided by a deer gallop | 43 of 60 | 41 of 60 | |
+| decided by a wolf gallop | 12 of 60 | 14 of 60 | |
+| runs stopped by the backstop cap | 1 | 2 | |
+
+The gait shares are the interesting row: they agree to within a percentage
+point on every gait including the rare ones, which is what says the two builds
+are running the same energy model and not merely landing on similar win rates.
+
+## Performance
+
+`./test.sh --perf`, mean cost of one simulation tick on the hub against the
+16.67 ms a 60 Hz frame allows:
+
+| animals | ms/tick |
+|---|---|
+| 5 wolves + 1 deer | 0.37 |
+| 80 wolves + 20 deer | 8.14 |
+| 50 wolves + 50 deer | 9.27 |
+
+**These are native numbers — the in-browser figure is not measured**, because
+there is no browser on the build host. Built in for that: the playback loop
+runs whole ticks from the frame delta with a hard catch-up cap, so a slow
+device plays the hunt back in slow motion rather than skipping it, and simulate
+mode slices its trials across frames on a 9 ms budget so the tab never blocks.
+
 ## Build and test
 
 ```bash
