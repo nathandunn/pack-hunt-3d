@@ -13,6 +13,8 @@ const Data := preload("res://scripts/data.gd")
 const Energy := preload("res://scripts/energy.gd")
 const Batch := preload("res://scripts/batch.gd")
 const Rng := preload("res://scripts/rng.gd")
+const Gait := preload("res://scripts/gait.gd")
+const Field := preload("res://ui/field.gd")
 
 var _pass := 0
 var _fail := 0
@@ -51,6 +53,9 @@ func _initialize() -> void:
 	_test_backcompat()
 	_test_batch()
 	_test_balance()
+	_test_facing()
+	_test_gait_cycle()
+	_test_shader_matches_gait()
 	print("%d passed, %d failed" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)
 
@@ -345,6 +350,184 @@ func _test_balance() -> void:
 	var kw := Batch.run_series(a["teamplayer"], weak, 5, 1, 120, 8500).kill_rate()
 	var ks := Batch.run_series(a["teamplayer"], strong, 5, 1, 120, 8500).kill_rate()
 	ok(kw > ks, "a weak deer is caught more often (%.2f vs %.2f)" % [kw, ks])
+
+
+##
+## Every animal faces the way it is going.
+##
+## This is the regression lock on the "deer and wolves run backwards" report.
+## It is asserted twice, because the two statements fail differently:
+##
+##   1. Against the heading, exactly. `facing_basis(h)` must carry the mesh's
+##      own forward (-Z, see `meshes.gd`) onto `travel_dir(h)`. A sign error in
+##      the basis shows up here at 1e-12, whatever the simulation is doing.
+##   2. Against the travel actually recorded, over a real hunt — the > 0.9 dot the
+##      handoff asks for, over every moving animal in every frame of a five-wolf
+##      chase.
+##
+##      Note the frame a heading belongs to. `world.gd` turns, then steps, then
+##      records — so the `h` stored in frame N is the heading the animal travelled
+##      on to REACH frame N, and the step to compare it against is the one out of
+##      frame N-1. That is also why the renderer is right to point frame N's
+##      animal along frame N's `h`: it is the direction it just came in on.
+##
+##      One class of tick is held out, and it is worth being precise about why.
+##      `route_around` is a hard push-out: a step that lands inside a deadfall
+##      patch is shoved back out along the patch's normal, and an animal grazing
+##      an edge is therefore displaced sideways, or briefly backwards, while still
+##      heading where it meant to go. The same goes for the field-edge clamp.
+##      About 5% of ticks are in contact like that, and on the rest the dot is
+##      exactly 1. So: contact ticks are excluded from the worst case and the
+##      mean is asserted over everything, contact included — a facing that flips
+##      cannot hide behind the exclusion, because it would take the mean with it.
+##
+func _test_facing() -> void:
+	for i in range(24):
+		var h := -PI + TAU * float(i) / 24.0
+		var fwd: Vector3 = Field.facing_basis(h) * Vector3.FORWARD
+		var want: Vector3 = Field.travel_dir(h)
+		near(fwd.dot(want), 1.0, 1e-6, "mesh forward is the travel direction at h=%.3f" % h)
+		near((Field.facing_basis(h) * Vector3.UP).dot(Vector3.UP), 1.0, 1e-6,
+			"the animal stays upright at h=%.3f" % h)
+
+	Energy.build()
+	var a := Data.archetypes()
+	var frames: Array = []
+	World.run_hunt(a["teamplayer"], a["defender"], 5, 1, 7, 1200, frames)
+	ok(frames.size() > 60, "the chase recorded frames to check (%d)" % frames.size())
+
+	var worst := 1.0
+	var total := 0.0
+	var checked := 0
+	var contact := 0
+	for i in range(frames.size() - 1):
+		for key: String in ["wolves", "deer"]:
+			var now: Array = frames[i][key]
+			var next: Array = frames[i + 1][key]
+			var r: float = World.WOLF_R if key == "wolves" else World.DEER_R
+			for j in range(now.size()):
+				var e: Dictionary = next[j]
+				if key == "deer" and (e["escaped"] or not e["alive"]):
+					continue
+				# world space: sim x -> +X, sim y -> +Z (field.gd's `M` cancels)
+				var d := Vector3(e["x"] - now[j]["x"], 0.0, e["y"] - now[j]["y"])
+				if d.length() < 0.05:
+					continue          # standing still has no direction to face
+				var fwd: Vector3 = Field.facing_basis(e["h"]) * Vector3.FORWARD
+				var dot := fwd.dot(d.normalized())
+				checked += 1
+				total += dot
+				if _shoved(e["x"], e["y"], r) or _shoved(now[j]["x"], now[j]["y"], r):
+					contact += 1
+				else:
+					worst = minf(worst, dot)
+	ok(checked > 2000, "checked a real number of moving animals (%d)" % checked)
+	ok(contact < checked / 8, "the deadfall push-out is a minority of ticks (%d/%d)" % [contact, checked])
+	ok(worst > 0.9, "body-forward . velocity stays above 0.9 (worst %.4f)" % worst)
+	ok(worst > 0.999, "and clear of the deadfall it is exact (worst %.6f)" % worst)
+	ok(total / float(checked) > 0.95,
+		"the mean over every tick, push-out included, is %.5f" % (total / float(checked)))
+
+
+## True where `route_around` or the field-edge clamp can displace a step off its
+## heading: within a body radius of a deadfall patch, or against a wall.
+func _shoved(x: float, y: float, r: float) -> bool:
+	if x < 1.0 or y < 1.0 or x > World.FIELD_W - 1.0 or y > World.FIELD_H - 1.0:
+		return true
+	for o: PackedFloat64Array in World.OBSTACLES:
+		var cx := clampf(x, o[0], o[0] + o[2])
+		var cy := clampf(y, o[1], o[1] + o[3])
+		if (x - cx) * (x - cx) + (y - cy) * (y - cy) < (r + 1.0) * (r + 1.0):
+			return true
+	return false
+
+
+##
+## The leg cycle is not mirrored: a foot lifts while it swings forward.
+##
+## Forward is -Z. The lift is `max(0, sin(ph*TAU))`, so it is non-zero exactly
+## on the first half of the cycle; over that half the foot must also be moving
+## forward of where it rests. The shipped `+=` had it the other way round — the
+## foot picked up on the back-swing and skated forward on the floor.
+##
+func _test_gait_cycle() -> void:
+	var foot := Vector2(1.0, 0.0)             # uv2: full swing weight, leg 0
+	var custom := Color(0.0, 1.0, 2.0, 0.0)   # phase 0, amplitude 1, gallop
+	var lifted_forward := 0
+	var planted := 0
+	for i in range(32):
+		var ph := float(i) / 32.0
+		custom.r = ph
+		var v: Vector3 = Gait.displace(Vector3.ZERO, foot, custom)
+		if v.y > 1e-6:
+			ok(v.z < 0.0, "a lifted foot is forward of the hip at ph=%.3f" % ph)
+			lifted_forward += 1
+		elif absf(v.z) > 1e-6:
+			ok(v.z > 0.0, "a planted foot travels aft at ph=%.3f" % ph)
+			planted += 1
+	ok(lifted_forward >= 14, "the swing phase is about half the cycle (%d/32)" % lifted_forward)
+	ok(planted >= 14, "the stance phase is about half the cycle (%d/32)" % planted)
+
+	# the four legs are spread across the cycle, not stepping in unison, on any
+	# gait but the bound
+	for pattern in range(3):
+		var seen := {}
+		for leg in range(4):
+			# 0.15 through the stride, not 0: a trot's two diagonal pairs are half
+			# a cycle apart, and at phase 0 both halves sit on a zero of the sine
+			var v: Vector3 = Gait.displace(Vector3.ZERO, Vector2(1.0, float(leg) / 4.0),
+				Color(0.15, 1.0, float(pattern), 0.0))
+			seen[snappedf(v.z, 0.0001)] = true
+		ok(seen.size() >= 2, "pattern %d does not put all four feet in one place" % pattern)
+
+	# the bound arc peaks mid-stride and touches down at both ends
+	for gait in [4, 5]:
+		var air := func(ph: float) -> float:
+			return Field.AIR[gait] * maxf(0.0, sin(fposmod(ph, 1.0) * PI))
+		near(air.call(0.0), 0.0, 1e-9, "gait %d starts the stride on the ground" % gait)
+		near(air.call(0.999), 0.0, 0.01, "gait %d lands by the end of the stride" % gait)
+		ok(air.call(0.5) > air.call(0.25) and air.call(0.5) > air.call(0.75),
+			"gait %d peaks in the middle of the stride" % gait)
+
+
+##
+## `scripts/gait.gd` and `ui/animals.gdshader` say the same thing.
+##
+## The run cycle has to live in the vertex shader to stay at two draw calls, and
+## nothing headless can run GLSL — so `gait.gd` mirrors it and everything above
+## tests `gait.gd`. That is only worth anything while the two agree, so: read the
+## shader and check the three displacement lines are still the ones mirrored. It
+## is a text match on purpose. If someone edits the shader, this fails and they
+## come here.
+##
+func _test_shader_matches_gait() -> void:
+	var f := FileAccess.open("res://ui/animals.gdshader", FileAccess.READ)
+	ok(f != null, "the shader source is readable")
+	if f == null:
+		return
+	var src := f.get_as_text()
+	for line in [
+			"VERTEX.z -= weight * swing;",
+			"VERTEX.y += weight * max(0.0, sin(ph * TAU)) * INSTANCE_CUSTOM.y * 0.22;",
+			"VERTEX.z += (1.0 - weight) * sign(VERTEX.z) * flex;",
+			"VERTEX.y += (1.0 - weight) * flex * 0.35;",
+			"float swing = sin(ph * TAU) * INSTANCE_CUSTOM.y;",
+			"float ph = fract(INSTANCE_CUSTOM.x + off);"]:
+		ok(src.contains(line), "the shader still has `%s` (mirrored in gait.gd)" % line)
+	for row in Gait.FOOTFALL:
+		var parts := PackedStringArray()
+		for v: float in row:
+			parts.push_back(_glsl_float(v))
+		var want := ", ".join(parts)
+		ok(src.contains(want), "the shader's FOOTFALL still has the row [%s]" % want)
+
+
+## `0.5` the way GLSL source writes it, not the way `%f` does.
+func _glsl_float(v: float) -> String:
+	var s := "%.2f" % v
+	while s.ends_with("0") and not s.ends_with(".0"):
+		s = s.substr(0, s.length() - 1)
+	return s
 
 
 func _perf() -> void:

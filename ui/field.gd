@@ -156,6 +156,39 @@ func _apply() -> void:
 	_fill(deer, f0["deer"], f1["deer"], t, Energy.DEER, DEER_TINT, true)
 
 
+##
+## Where an animal at sim heading `h` is going, in world space.
+##
+## Sim space is 2D with x to the right and y downward; this view maps sim x onto
+## world +X and sim y onto world +Z (see `M` above), so a heading advances along
+## (cos h, 0, sin h). `world.gd` moves every animal by exactly `cos(h), sin(h)`
+## times its speed, so this IS the velocity direction, not an approximation of
+## one.
+##
+static func travel_dir(h: float) -> Vector3:
+	return Vector3(cos(h), 0.0, sin(h))
+
+
+##
+## The instance basis for an animal travelling at sim heading `h`.
+##
+## The meshes in `meshes.gd` are built nose-toward -Z, which is Godot's forward,
+## so the basis has to carry local -Z onto `travel_dir(h)`.
+##
+## `Basis(Vector3.UP, t)` sends (0, 0, -1) to (-sin t, 0, -cos t). Setting that
+## equal to (cos h, 0, sin h) gives sin t = -cos h and cos t = -sin h, i.e.
+## t = -h - PI/2.
+##
+## The build shipped `-h + PI/2`, which is that vector negated — every animal on
+## the field faced exactly 180 degrees away from its travel. That is the whole
+## of the "deer and wolves run backwards" report, and the reason it survived
+## review is that a wolf pointing away from a deer it is closing on still looks
+## purposeful in a still frame.
+##
+static func facing_basis(h: float) -> Basis:
+	return Basis(Vector3.UP, -h - PI * 0.5)
+
+
 func _fill(node: MultiMeshInstance3D, a: Array, b: Array, t: float,
 		sp: int, tint: Color, is_deer: bool) -> void:
 	var mm := node.multimesh
@@ -183,9 +216,10 @@ func _fill(node: MultiMeshInstance3D, a: Array, b: Array, t: float,
 		if not dead and AIR[gait] > 0.0:
 			air = AIR[gait] * maxf(0.0, sin(fposmod(phase, 1.0) * PI))
 
-		var basis := Basis(Vector3.UP, -e["h"] + PI * 0.5)
+		var basis := facing_basis(e["h"])
 		if dead:
-			basis = basis.rotated(Vector3(cos(e["h"]), 0, -sin(e["h"])), PI * 0.5)
+			# topple onto the flank: a roll about the animal's own forward axis
+			basis = basis.rotated(travel_dir(e["h"]), PI * 0.5)
 		var tr := Transform3D(basis, Vector3(x, air, z))
 		mm.set_instance_transform(j, tr)
 

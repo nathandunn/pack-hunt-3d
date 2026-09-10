@@ -95,6 +95,45 @@ The **vertical of a bound is not in the shader** — it is in the instance
 transform, because a leap has to move the whole animal and cast its shadow from
 somewhere other than its feet.
 
+### Which way an animal points
+
+Fixed 2026-09-10, after a report that deer and wolves ran backwards on a phone.
+Two separate sign errors, both in this section of the code:
+
+* **The instance basis.** The meshes are built nose-toward `-Z`, which is
+  Godot's forward. The sim's heading `h` travels along world `(cos h, 0, sin h)`,
+  and `Basis(Vector3.UP, t)` carries `-Z` onto `(-sin t, 0, -cos t)`, so the
+  rotation is `t = -h - π/2`. The build shipped `-h + π/2`: the same vector
+  negated, so every animal on the field faced exactly 180° away from its travel.
+* **The leg cycle.** A leg lifts while it swings *forward* and stays planted
+  while it travels aft under the body. The lift term is `max(0, sin)` — the first
+  half of the cycle — so the fore-and-aft term has to be forward over that same
+  half, and forward is `-Z`. The shader had `VERTEX.z += weight * swing`, which
+  put the lift on the stance half instead: the feet skated forward on the ground
+  and picked up on the way back.
+
+Both are now asserted headlessly (`_test_facing`, `_test_gait_cycle`), and there
+is a picture:
+
+```bash
+godot --headless --script res://scripts/preview.gd -- --preview docs/facing.png
+```
+
+![wolf and deer facing their travel](docs/facing.png)
+
+Four panels — wolf and deer, two headings each. The green arrow is
+`Field.travel_dir(h)`; the magenta dot is the animal's nose. Nose at the
+arrowhead is the whole test. `scripts/preview.gd` is a software rasteriser
+rather than a screenshot because `--headless` gives Godot the dummy rendering
+driver: there is no viewport to capture and no GLSL to run. It takes the mesh,
+the gait displacement and the instance basis from exactly the code the app
+ships, so if the app faces the wrong way, so does the picture.
+
+The one thing that cannot be shared is the gait maths itself, which has to live
+in GLSL to stay at two draw calls. `scripts/gait.gd` mirrors it for the preview
+and the tests, and `_test_shader_matches_gait` reads the shader source and
+asserts the mirrored lines are still the ones in it.
+
 ## Camera
 
 45° elevation looking at the herd by default.
@@ -153,6 +192,8 @@ mode slices its trials across frames on a 9 ms budget so the tab never blocks.
 ./test.sh --perf         # tick cost at 100 animals against the 16.67 ms budget
 ./test.sh --parity 6     # the table this README's parity section quotes
 ./build.sh               # web export into dist/
+
+godot --headless --script res://scripts/preview.gd -- --preview docs/facing.png
 ```
 
 Needs Godot 4.7.2 and the matching web export templates —

@@ -39,9 +39,15 @@ void vertex() {
 	float ph = fract(INSTANCE_CUSTOM.x + off);
 	float swing = sin(ph * TAU) * INSTANCE_CUSTOM.y;
 
-	// the leg swings fore and aft along the body's own forward axis, and lifts
-	// as it comes through — a limb that stays on the floor reads as a skid
-	VERTEX.z += weight * swing;
+	// The leg swings fore and aft along the body's own forward axis and lifts as
+	// it comes through — a limb that stays on the floor reads as a skid.
+	//
+	// Forward is -Z, and the lift below is `max(0, sin)` — the first half of the
+	// cycle. So the fore-and-aft term must be FORWARD over that same half, which
+	// is `-=`. With `+=` the foot lifted on the stance half and skated forward on
+	// the floor: the moonwalk half of the "animals run backwards" report.
+	// `scripts/gait.gd` mirrors these three lines; tests.gd asserts they match.
+	VERTEX.z -= weight * swing;
 	VERTEX.y += weight * max(0.0, sin(ph * TAU)) * INSTANCE_CUSTOM.y * 0.22;
 
 	// the spine gathers and extends. Applied to everything that is not a leg,

@@ -23,15 +23,8 @@ extends RefCounted
 ## from a different place than its feet.
 ##
 
-## Footfall patterns, as four phase offsets. Same numbers as the canvas build's
-## `footPhase`: walk steps in sequence, trot moves diagonal pairs, gallop is
-## fore-pair-then-hind-pair, bound puts all four down together.
-const FOOTFALL := [
-	[0.0, 0.5, 0.25, 0.75],   # walk
-	[0.0, 0.5, 0.5, 0.0],     # trot
-	[0.0, 0.12, 0.55, 0.67],  # gallop
-	[0.0, 0.0, 0.0, 0.0],     # bound
-]
+## The footfall patterns this mesh's UV2 leg indices are looked up in live in
+## `scripts/gait.gd`, next to the displacement that consumes them.
 
 
 static func _box(st: SurfaceTool, c: Vector3, half: Vector3, swing: float, offset: float) -> void:
