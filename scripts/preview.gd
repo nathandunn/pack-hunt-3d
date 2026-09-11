@@ -3,6 +3,12 @@ extends SceneTree
 ## A software-rasterised still of the animals, for looking at.
 ##
 ##   godot --headless --script res://scripts/preview.gd -- --preview docs/facing.png
+##   godot --headless --script res://scripts/preview.gd -- --legacy --preview docs/palette-before.png
+##
+## `--legacy` swaps in the colours the app shipped with — a dark grey-brown wolf
+## and a mid-brown deer on near-black grass, all three under 2 : 1 against each
+## other — so the palette change has a before picture taken through the same
+## lens as the after one.
 ##
 ## Why this exists: the "animals run backwards" bug was a sign in a rotation, and
 ## a sign in a rotation is invisible in every number the suite prints. What made
@@ -12,9 +18,15 @@ extends SceneTree
 ## dummy rendering driver, so there is no viewport to capture and no GLSL to run.
 ## The mesh, the gait displacement and — the point of the exercise — the instance
 ## basis are therefore taken from exactly the code the app ships:
-## `Meshes.build`, `Gait.displace`, `Field.facing_basis`. The only thing invented
-## here is the camera and the triangle fill. If the app faces the wrong way, so
-## does this picture.
+## `Meshes.build`, `Gait.displace`, `Field.facing_basis`, and the colours from
+## `Palette`. The only thing invented here is the camera. The fill is shared
+## with `scripts/blocks.gd` in `scripts/raster.gd`.
+##
+## Back-face culling is **off** here and on there, and that is not an oversight:
+## the animals are drawn by `ui/animals.gdshader`, which is `render_mode
+## cull_disabled` because the legs are thin enough to be worth seeing from
+## either side. The obstacles are `StandardMaterial3D` and are culled. Each
+## picture reproduces its own subject's pipeline.
 ##
 ## Layout: four panels. Columns are wolf, deer; rows are two headings. Each panel
 ## draws a green velocity arrow along `Field.travel_dir(h)` and puts a magenta
@@ -24,6 +36,8 @@ extends SceneTree
 const Meshes := preload("res://scripts/meshes.gd")
 const Gait := preload("res://scripts/gait.gd")
 const Field := preload("res://ui/field.gd")
+const Palette := preload("res://scripts/palette.gd")
+const Raster := preload("res://scripts/raster.gd")
 
 const W := 1000
 const H := 660
@@ -36,33 +50,44 @@ const FOV := deg_to_rad(38.0)
 const EYE := Vector3(6.0, 4.7, 9.2)
 const AIM := Vector3(0.0, 2.05, 0.0)
 
-const BG := Color(0.055, 0.065, 0.048)
-const GROUND := Color(0.105, 0.135, 0.085)
+const BG := Palette.SKY
+const GROUND := Palette.GROUND
 const SUN := Vector3(-0.42, -0.78, -0.46)
+## Annotation, not scenery, so these two are deliberately outside the palette:
+## they have to shout over whatever the palette is.
 const ARROW := Color(0.42, 0.92, 0.40)
 const NOSE := Color(0.95, 0.25, 0.75)
-const RULE := Color(0.20, 0.24, 0.18)
+const RULE := Color(0.55, 0.58, 0.52)
 
+## The pre-palette colours, kept only so `--legacy` can draw the before shot.
+const LEGACY := {
+	"bg": Color(0.055, 0.065, 0.048),
+	"ground": Color(0.105, 0.135, 0.085),
+	"wolf": Color(0.42, 0.38, 0.32),
+	"deer": Color(0.60, 0.44, 0.27),
+}
+
+var _legacy := false
+var _r: Raster
 var _img: Image
-var _z: PackedFloat32Array
 
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	var path := "docs/facing.png"
 	for i in range(args.size()):
-		if args[i] == "--preview" and i + 1 < args.size():
+		if args[i] == "--legacy":
+			_legacy = true
+		elif args[i] == "--preview" and i + 1 < args.size():
 			path = args[i + 1]
 	_render(path)
 	quit(0)
 
 
 func _render(path: String) -> void:
-	_img = Image.create(W, H, false, Image.FORMAT_RGB8)
-	_img.fill(BG)
-	_z = PackedFloat32Array()
-	_z.resize(W * H)
-	_z.fill(INF)
+	_r = Raster.new(W, H, LEGACY["bg"] if _legacy else BG)
+	_r.cull_back = false            # the animals shader is cull_disabled
+	_img = _r.img
 
 	# wolf gallop mid-swing, deer bound at the apex — both the gaits the report
 	# was about, both at a phase where a foot is off the ground
@@ -88,19 +113,12 @@ func _render(path: String) -> void:
 	for y in range(H):
 		_img.set_pixel(pw, y, RULE)
 
-	var dir := path.get_base_dir()
-	if dir != "" and not DirAccess.dir_exists_absolute(dir):
-		DirAccess.make_dir_recursive_absolute(dir)
-	var err := _img.save_png(path)
-	if err != OK:
-		printerr("could not write %s (%d)" % [path, err])
-		return
+	_r.save(path)
 	print("preview -> %s  %dx%d  (green arrow = travel, magenta dot = nose)" % [path, W, H])
 
 
 func _panel(rect: Rect2i, deer: bool, h: float, gait: int, phase: float) -> void:
-	var cam := Transform3D(Basis.IDENTITY, EYE).looking_at(AIM, Vector3.UP)
-	var inv := cam.affine_inverse()
+	var inv := Raster.view(EYE, AIM)
 	var f := (float(rect.size.y) * 0.5) / tan(FOV * 0.5)
 	var cx := float(rect.position.x) + float(rect.size.x) * 0.5
 	var cy := float(rect.position.y) + float(rect.size.y) * 0.5
@@ -111,12 +129,12 @@ func _panel(rect: Rect2i, deer: bool, h: float, gait: int, phase: float) -> void
 
 	# the ground, so the feet have something to be on
 	var g := 26.0
-	for tri in [[Vector3(-g, 0, -g), Vector3(g, 0, -g), Vector3(g, 0, g)],
+	for t in [[Vector3(-g, 0, -g), Vector3(g, 0, -g), Vector3(g, 0, g)],
 			[Vector3(-g, 0, -g), Vector3(g, 0, g), Vector3(-g, 0, g)]]:
-		_tri(rect, inv, f, cx, cy, tri[0], tri[1], tri[2], GROUND)
+		_r.tri(rect, inv, f, t[0], t[1], t[2], _ground(), false)
 
 	var custom := Color(phase, Field.SWING[gait], float(Field.PATTERN[gait]), Field.FLEX[gait])
-	var tint: Color = Field.DEER_TINT if deer else Field.WOLF_TINT
+	var tint: Color = _tint(deer)
 	var arrays: Array = Meshes.build(deer).surface_get_arrays(0)
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
@@ -139,8 +157,8 @@ func _panel(rect: Rect2i, deer: bool, h: float, gait: int, phase: float) -> void
 		var c := idx[t + 2]
 		var n: Vector3 = (basis * norms[a]).normalized()
 		var lit: float = 0.34 + 0.66 * maxf(0.0, n.dot(-light))
-		_tri(rect, inv, f, cx, cy, world[a], world[b], world[c],
-			Color(tint.r * lit, tint.g * lit, tint.b * lit))
+		_r.tri(rect, inv, f, world[a], world[b], world[c],
+			Color(tint.r * lit, tint.g * lit, tint.b * lit), false)
 
 	# the two overlays, drawn last and on top of the depth buffer on purpose:
 	# they are annotation, not scenery
@@ -148,55 +166,19 @@ func _panel(rect: Rect2i, deer: bool, h: float, gait: int, phase: float) -> void
 	# the arrow floats above the animal so it cannot sit on top of the nose dot
 	var tail := Vector3(0.0, 3.6, 0.0) - d * 0.6
 	_arrow(rect, inv, f, cx, cy, tail, tail + d * 3.6)
-	var np := _project(inv, f, cx, cy, world[nose])
+	var np := _r.project(inv, f, cx, cy, world[nose])
 	if np.z > 0.0:
 		_disc(rect, int(np.x), int(np.y), 5, NOSE)
 
 
-func _project(inv: Transform3D, f: float, cx: float, cy: float, p: Vector3) -> Vector3:
-	var c := inv * p
-	var depth := -c.z
-	if depth < 0.02:
-		return Vector3(0, 0, -1)
-	return Vector3(cx + c.x / depth * f, cy - c.y / depth * f, depth)
+func _ground() -> Color:
+	return LEGACY["ground"] if _legacy else GROUND
 
 
-func _edge(a: Vector3, b: Vector3, px: float, py: float) -> float:
-	return (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)
-
-
-func _tri(rect: Rect2i, inv: Transform3D, f: float, cx: float, cy: float,
-		p0: Vector3, p1: Vector3, p2: Vector3, col: Color) -> void:
-	var a := _project(inv, f, cx, cy, p0)
-	var b := _project(inv, f, cx, cy, p1)
-	var c := _project(inv, f, cx, cy, p2)
-	if a.z < 0.0 or b.z < 0.0 or c.z < 0.0:
-		return                      # no near-plane clipping: nothing here crosses it
-	var area := _edge(a, b, c.x, c.y)
-	if absf(area) < 1e-9:
-		return
-	var x0 := maxi(rect.position.x, int(floor(minf(a.x, minf(b.x, c.x)))))
-	var x1 := mini(rect.position.x + rect.size.x - 1, int(ceil(maxf(a.x, maxf(b.x, c.x)))))
-	var y0 := maxi(rect.position.y, int(floor(minf(a.y, minf(b.y, c.y)))))
-	var y1 := mini(rect.position.y + rect.size.y - 1, int(ceil(maxf(a.y, maxf(b.y, c.y)))))
-	for y in range(y0, y1 + 1):
-		for x in range(x0, x1 + 1):
-			var px := float(x) + 0.5
-			var py := float(y) + 0.5
-			var w0 := _edge(b, c, px, py) / area
-			if w0 < 0.0:
-				continue
-			var w1 := _edge(c, a, px, py) / area
-			if w1 < 0.0:
-				continue
-			var w2 := 1.0 - w0 - w1
-			if w2 < 0.0:
-				continue
-			var z := w0 * a.z + w1 * b.z + w2 * c.z
-			var o := y * W + x
-			if z < _z[o]:
-				_z[o] = z
-				_img.set_pixel(x, y, col)
+func _tint(deer: bool) -> Color:
+	if _legacy:
+		return LEGACY["deer"] if deer else LEGACY["wolf"]
+	return Field.DEER_TINT if deer else Field.WOLF_TINT
 
 
 func _disc(rect: Rect2i, cx: int, cy: int, r: int, col: Color) -> void:
@@ -211,8 +193,8 @@ func _disc(rect: Rect2i, cx: int, cy: int, r: int, col: Color) -> void:
 
 func _arrow(rect: Rect2i, inv: Transform3D, f: float, cx: float, cy: float,
 		from_w: Vector3, to_w: Vector3) -> void:
-	var a := _project(inv, f, cx, cy, from_w)
-	var b := _project(inv, f, cx, cy, to_w)
+	var a := _r.project(inv, f, cx, cy, from_w)
+	var b := _r.project(inv, f, cx, cy, to_w)
 	if a.z < 0.0 or b.z < 0.0:
 		return
 	_line(rect, Vector2(a.x, a.y), Vector2(b.x, b.y), 3)

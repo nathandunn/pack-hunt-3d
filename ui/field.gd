@@ -19,6 +19,7 @@ extends Node3D
 const World := preload("res://scripts/world.gd")
 const Energy := preload("res://scripts/energy.gd")
 const Meshes := preload("res://scripts/meshes.gd")
+const Palette := preload("res://scripts/palette.gd")
 
 const M := 0.25                       # metres per sim unit
 const FIELD_M_W := World.FIELD_W * M
@@ -35,8 +36,11 @@ const FLEX := [0.02, 0.05, 0.16, 0.22, 0.20, 0.03]
 ## Height of the leap, in metres, per gait.
 const AIR := [0.0, 0.0, 0.10, 0.14, 1.05, 0.55]
 
-const WOLF_TINT := Color(0.42, 0.38, 0.32)
-const DEER_TINT := Color(0.60, 0.44, 0.27)
+## Coat colours live in `scripts/palette.gd` with the contrast numbers that
+## justify them; these two aliases exist so `scripts/preview.gd` and the tests
+## can keep asking the renderer rather than the palette.
+const WOLF_TINT := Palette.WOLF
+const DEER_TINT := Palette.DEER
 
 var wolves: MultiMeshInstance3D
 var deer: MultiMeshInstance3D
@@ -51,12 +55,12 @@ func _ready() -> void:
 	var env := WorldEnvironment.new()
 	var e := Environment.new()
 	e.background_mode = Environment.BG_COLOR
-	e.background_color = Color(0.043, 0.051, 0.035)
+	e.background_color = Palette.SKY
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	e.ambient_light_color = Color(0.35, 0.40, 0.34)
+	e.ambient_light_color = Palette.AMBIENT
 	e.ambient_light_energy = 0.55
 	e.fog_enabled = true
-	e.fog_light_color = Color(0.07, 0.09, 0.06)
+	e.fog_light_color = Palette.FOG
 	e.fog_density = 0.0016
 	env.environment = e
 	add_child(env)
@@ -64,13 +68,18 @@ func _ready() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-52, 38, 0)
 	sun.light_energy = 1.15
-	sun.light_color = Color(1.0, 0.96, 0.86)
+	sun.light_color = Palette.SUN_LIGHT
 	sun.shadow_enabled = true
+	## The field is 225 m across and the camera sits 150 m off it, so the 100 m
+	## default shadow range ended part way over the grass and the split boundary
+	## crawled as the view moved. Cover the whole plain and the diagonal a
+	## zoomed-out camera can see.
+	sun.directional_shadow_max_distance = 420.0
 	add_child(sun)
 
 	_build_ground()
-	wolves = _multimesh(Meshes.build(false), mat, WOLF_TINT)
-	deer = _multimesh(Meshes.build(true), mat, DEER_TINT)
+	wolves = _multimesh(Meshes.build(false), mat, Palette.WOLF)
+	deer = _multimesh(Meshes.build(true), mat, Palette.DEER)
 
 
 func _multimesh(mesh: ArrayMesh, mat: ShaderMaterial, tint: Color) -> MultiMeshInstance3D:
@@ -84,6 +93,17 @@ func _multimesh(mesh: ArrayMesh, mat: ShaderMaterial, tint: Color) -> MultiMeshI
 	node.multimesh = mm
 	node.material_override = mat
 	node.set_meta("tint", tint)
+	##
+	## Pin the visibility AABB to the whole plain plus headroom for a bounding
+	## deer. A MultiMesh derives its AABB from the instance transforms it has
+	## been given, which means the batch's bounds trail the simulation by a
+	## frame and, at an instance count that changes every frame as deer escape,
+	## can be stale enough for the frustum test to drop the entire batch. That
+	## is the classic "the whole herd blinks out when I turn the camera", and
+	## the fix is to stop asking: the animals never leave the field, so say so.
+	##
+	node.custom_aabb = AABB(Vector3(-8.0, -2.0, -8.0),
+		Vector3(FIELD_M_W + 16.0, 12.0, FIELD_M_H + 16.0))
 	add_child(node)
 	return node
 
@@ -92,7 +112,7 @@ func _build_ground() -> void:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(FIELD_M_W, FIELD_M_H)
 	var gm := StandardMaterial3D.new()
-	gm.albedo_color = Color(0.105, 0.135, 0.085)
+	gm.albedo_color = Palette.GROUND
 	gm.roughness = 1.0
 	var ground := MeshInstance3D.new()
 	ground.mesh = plane
@@ -104,9 +124,9 @@ func _build_ground() -> void:
 	var goal := PlaneMesh.new()
 	goal.size = Vector2((World.GOAL_X + 16.0) * M, FIELD_M_H)
 	var gmat := StandardMaterial3D.new()
-	gmat.albedo_color = Color(0.35, 0.62, 0.34)
+	gmat.albedo_color = Palette.GOAL
 	gmat.emission_enabled = true
-	gmat.emission = Color(0.18, 0.36, 0.17)
+	gmat.emission = Palette.GOAL_GLOW
 	gmat.emission_energy_multiplier = 0.5
 	var gi := MeshInstance3D.new()
 	gi.mesh = goal
@@ -114,15 +134,26 @@ func _build_ground() -> void:
 	gi.position = Vector3((World.GOAL_X + 16.0) * M * 0.5, 0.02, FIELD_M_H * 0.5)
 	add_child(gi)
 
-	# deadfall: one MeshInstance3D per patch, five of them, static
-	var bm := StandardMaterial3D.new()
-	bm.albedo_color = Color(0.20, 0.22, 0.12)
-	bm.roughness = 1.0
+	##
+	## Deadfall: one MeshInstance3D per patch, five of them, static.
+	##
+	## Three surface materials rather than one `material_override`: the sides,
+	## a top cap a step lighter, and the fallen trunks a step darker. That is
+	## what gives the slab a visible top edge from the fixed 45-degree camera
+	## instead of it reading as a rectangle painted on the grass.
+	##
+	var mats: Array[StandardMaterial3D] = []
+	for c: Color in [Palette.OBSTACLE, Palette.OBSTACLE_TOP, Palette.OBSTACLE_TRUNK]:
+		var m := StandardMaterial3D.new()
+		m.albedo_color = c
+		m.roughness = 1.0
+		mats.push_back(m)
 	for i in range(World.OBSTACLES.size()):
 		var o: PackedFloat64Array = World.OBSTACLES[i]
 		var mi := MeshInstance3D.new()
 		mi.mesh = Meshes.brush(o[2] * M, o[3] * M, i)
-		mi.material_override = bm
+		for si in range(mi.mesh.get_surface_count()):
+			mi.set_surface_override_material(si, mats[si])
 		mi.position = Vector3((o[0] + o[2] * 0.5) * M, 0.0, (o[1] + o[3] * 0.5) * M)
 		add_child(mi)
 
@@ -152,8 +183,8 @@ func _apply() -> void:
 	var t: float = _cursor - float(i0)
 	var f0: Dictionary = _frames[i0]
 	var f1: Dictionary = _frames[i1]
-	_fill(wolves, f0["wolves"], f1["wolves"], t, Energy.WOLF, WOLF_TINT, false)
-	_fill(deer, f0["deer"], f1["deer"], t, Energy.DEER, DEER_TINT, true)
+	_fill(wolves, f0["wolves"], f1["wolves"], t, Energy.WOLF, false)
+	_fill(deer, f0["deer"], f1["deer"], t, Energy.DEER, true)
 
 
 ##
@@ -190,7 +221,7 @@ static func facing_basis(h: float) -> Basis:
 
 
 func _fill(node: MultiMeshInstance3D, a: Array, b: Array, t: float,
-		sp: int, tint: Color, is_deer: bool) -> void:
+		sp: int, is_deer: bool) -> void:
 	var mm := node.multimesh
 	var shown := 0
 	for i in range(a.size()):
@@ -223,11 +254,19 @@ func _fill(node: MultiMeshInstance3D, a: Array, b: Array, t: float,
 		var tr := Transform3D(basis, Vector3(x, air, z))
 		mm.set_instance_transform(j, tr)
 
-		# fatigue darkens the coat: a spent animal reads as a spent animal
-		var lit: float = 1.0 - 0.45 * e["fatigue"]
-		var c := Color(tint.r * lit, tint.g * lit, tint.b * lit)
+		##
+		## Fatigue washes the coat out rather than darkening it. The old code
+		## multiplied the tint by as little as 0.55, which dropped a spent deer
+		## from 4.19 : 1 against the grass to 2.31 : 1 — the animal was hardest
+		## to see at the exact moment the chase is decided. `Palette.coat`
+		## interpolates toward a spent tone of the same lightness instead.
+		##
+		var c: Color = Palette.coat(
+			Palette.DEER if is_deer else Palette.WOLF,
+			Palette.DEER_SPENT if is_deer else Palette.WOLF_SPENT,
+			e["fatigue"])
 		if dead:
-			c = Color(0.30, 0.18, 0.16)
+			c = Palette.DEAD
 		mm.set_instance_color(j, c)
 		mm.set_instance_custom_data(j, Color(
 			fposmod(phase, 1.0),

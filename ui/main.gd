@@ -2,7 +2,7 @@ extends Node3D
 ##
 ## The app: a 3D field, a setup drawer, and two modes.
 ##
-## `single` plays one hunt back at 30 Hz over an orbitable camera. `simulate`
+## `single` plays one hunt back at 30 Hz under a fixed 45-degree camera. `simulate`
 ## runs N seeded hunts headless, sliced across frames so the browser tab never
 ## blocks, and shows the stats the handoff asks for — kill rate, mean chase
 ## length, energy at the outcome, and which gait decided it.
@@ -23,7 +23,8 @@ const Batch := preload("res://scripts/batch.gd")
 const Data := preload("res://scripts/data.gd")
 const Energy := preload("res://scripts/energy.gd")
 const Field := preload("res://ui/field.gd")
-const OrbitCam := preload("res://ui/camera.gd")
+const Cam := preload("res://ui/camera.gd")
+const Palette := preload("res://scripts/palette.gd")
 
 const BACK_LINK_GUTTER := 118.0
 const TOP_BAR_H := 46.0
@@ -85,12 +86,12 @@ func _ready() -> void:
 	_field = Field.new()
 	add_child(_field)
 
-	_cam = OrbitCam.new()
+	_cam = Cam.new()
 	_cam.far = 900.0
 	add_child(_cam)
 	_cam.field_extent = Vector2(Field.FIELD_M_W, Field.FIELD_M_H)
-	# 45 degrees, on the herd: the deer starts on the right and the pack is in
-	# the middle, so the interesting half is the right two-thirds
+	# fixed 45 degrees, on the herd: the deer starts on the right and the pack
+	# is in the middle, so the interesting half is the right two-thirds
 	_cam.setup(Vector3(Field.FIELD_M_W * 0.58, 0, Field.FIELD_M_H * 0.5), 150.0)
 
 	_build_ui()
@@ -102,8 +103,8 @@ func _theme() -> Theme:
 	var t := Theme.new()
 	t.default_font_size = 15
 	var btn := StyleBoxFlat.new()
-	btn.bg_color = Color(0.10, 0.12, 0.09)
-	btn.border_color = Color(1, 1, 1, 0.16)
+	btn.bg_color = Palette.UI_BUTTON
+	btn.border_color = Palette.UI_BORDER
 	btn.set_border_width_all(1)
 	btn.set_corner_radius_all(7)
 	btn.content_margin_left = 12
@@ -111,24 +112,24 @@ func _theme() -> Theme:
 	btn.content_margin_top = 7
 	btn.content_margin_bottom = 7
 	var hov := btn.duplicate() as StyleBoxFlat
-	hov.bg_color = Color(0.16, 0.19, 0.14)
+	hov.bg_color = Palette.UI_BUTTON_HOVER
 	var prs := btn.duplicate() as StyleBoxFlat
-	prs.bg_color = Color(0.53, 0.39, 0.18)
+	prs.bg_color = Palette.UI_BUTTON_PRESSED
 	for cls: String in ["Button", "OptionButton"]:
 		t.set_stylebox("normal", cls, btn)
 		t.set_stylebox("hover", cls, hov)
 		t.set_stylebox("pressed", cls, prs)
 		t.set_stylebox("focus", cls, StyleBoxEmpty.new())
-		t.set_color("font_color", cls, Color(0.90, 0.92, 0.87))
+		t.set_color("font_color", cls, Palette.UI_TEXT)
 	var panel := StyleBoxFlat.new()
-	panel.bg_color = Color(0.063, 0.075, 0.055, 0.95)
-	panel.border_color = Color(1, 1, 1, 0.12)
+	panel.bg_color = Color(Palette.UI_PANEL, 0.95)
+	panel.border_color = Palette.UI_BORDER_SOFT
 	panel.set_border_width_all(1)
 	panel.set_corner_radius_all(10)
 	panel.set_content_margin_all(12)
 	t.set_stylebox("panel", "PanelContainer", panel)
-	t.set_color("font_color", "Label", Color(0.86, 0.89, 0.83))
-	t.set_color("default_color", "RichTextLabel", Color(0.86, 0.89, 0.83))
+	t.set_color("font_color", "Label", Palette.UI_TEXT)
+	t.set_color("default_color", "RichTextLabel", Palette.UI_TEXT)
 	return t
 
 
@@ -240,7 +241,7 @@ func _button(text: String, cb: Callable) -> Button:
 
 func _build_drawer(root: Control) -> void:
 	_scrim = ColorRect.new()
-	_scrim.color = Color(0, 0, 0, 0.45)
+	_scrim.color = Palette.UI_SCRIM
 	_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_scrim.visible = false
 	_scrim.gui_input.connect(func(e: InputEvent) -> void:
@@ -561,13 +562,15 @@ func _show_result() -> void:
 	if _result.is_empty():
 		return
 	var deer_win: bool = _result["winner"] == "deer"
-	var head := "[color=#8fc98a]ESCAPED[/color]" if deer_win else "[color=#e07b3c]CAUGHT[/color]"
+	var head := "[color=%s]ESCAPED[/color]" % Palette.GOAL.to_html(false) if deer_win \
+			else "[color=%s]CAUGHT[/color]" % Palette.DEAD.to_html(false)
 	if deer_win and _result["capped"]:
-		head = "[color=#8fc98a]SURVIVED[/color] (the pack ran out the backstop)"
-	_stats.text = "[b]%s[/b]  in %.1fs\ndecided by [b]%s[/b] · chase %.1fs\ndeer tank at the end %d%% · pack tank %d%%\n\n[color=#7e8875]drag to orbit · right-drag or two fingers to pan · wheel or pinch to zoom[/color]" % [
+		head = "[color=%s]SURVIVED[/color] (the pack ran out the backstop)" % Palette.GOAL.to_html(false)
+	_stats.text = "[b]%s[/b]  in %.1fs\ndecided by [b]%s[/b] · chase %.1fs\ndeer tank at the end %d%% · pack tank %d%%\n\n[color=%s]drag to pan · wheel or pinch to zoom · the view is fixed at 45°[/color]" % [
 		head, float(_result["ticks"]) / Energy.TICKS_PER_SEC, _result["decided_by"],
 		float(_result["chase_ticks"]) / Energy.TICKS_PER_SEC,
-		int(round(_result["deer_energy"] * 100.0)), int(round(_result["wolf_energy"] * 100.0))]
+		int(round(_result["deer_energy"] * 100.0)), int(round(_result["wolf_energy"] * 100.0)),
+		Palette.UI_MUTED.to_html(false)]
 
 
 func _show_sim() -> void:
@@ -587,8 +590,8 @@ func _show_sim() -> void:
 			float(s.chase) / float(s.n) / Energy.TICKS_PER_SEC] \
 		+ "energy at the outcome — deer [b]%d%%[/b], pack [b]%d%%[/b]\n" % [
 			int(round(s.deer_e / float(s.n) * 100.0)), int(round(s.wolf_e / float(s.n) * 100.0))] \
-		+ "[color=#7e8875]decided by: %s[/color]\n" % " · ".join(by) \
-		+ "[color=#d4a24c]wolf[/color] walk %.0f%% trot %.0f%% gallop %.0f%% sprint %.0f%%\n" % [
+		+ "[color=%s]decided by: %s[/color]\n" % [Palette.UI_MUTED.to_html(false), " · ".join(by)] \
+		+ "[color=" + Palette.WOLF.to_html(false) + "]wolf[/color] walk %.0f%% trot %.0f%% gallop %.0f%% sprint %.0f%%\n" % [
 			wg[0] * 100.0, wg[1] * 100.0, wg[2] * 100.0, wg[3] * 100.0] \
-		+ "[color=#8fc98a]deer[/color] trot %.0f%% gallop %.0f%% sprint %.0f%% bound %.0f%% stot %.0f%%" % [
+		+ "[color=" + Palette.DEER.to_html(false) + "]deer[/color] trot %.0f%% gallop %.0f%% sprint %.0f%% bound %.0f%% stot %.0f%%" % [
 			dg[1] * 100.0, dg[2] * 100.0, dg[3] * 100.0, dg[4] * 100.0, dg[5] * 100.0]

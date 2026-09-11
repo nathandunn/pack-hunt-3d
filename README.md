@@ -80,6 +80,38 @@ makes it rational.
 
 ## Rendering
 
+### Colour
+
+The whole palette is `scripts/palette.gd` and nothing else in the project may
+name a colour — `_test_palette_contrast` greps `ui/` for a literal `Color(…)`
+and fails on one.
+
+Every element a viewer has to pick out clears **WCAG 3:1** against the ground,
+which is the bar for non-text graphical objects, and the test checks it rather
+than the comment claiming it:
+
+| | hex | vs ground |
+|---|---|---|
+| ground | `#34412b` | — |
+| wolf | `#dfe2db` | 8.28 : 1 |
+| deer | `#dd8f4e` | 4.19 : 1 |
+| deadfall | `#c89a55` | 4.24 : 1 |
+| deadfall top | `#e3c489` | 6.47 : 1 |
+| goal strip | `#8ed07a` | 5.91 : 1 |
+
+Wolf against deer is only 1.98 : 1 in luminance and that is deliberate: the two
+species separate on **hue** — neutral grey against warm tan — which survives
+daylight and the common forms of colour blindness where a luminance-only split
+does not. What must not happen is either sinking into the field.
+
+Fatigue used to multiply the coat by as little as 0.55, which took a spent deer
+to 2.31 : 1 — least visible exactly when the chase is decided. It now
+interpolates toward a *spent* tone of the same lightness, and the test walks the
+whole 0→1 ramp.
+
+`docs/palette-before.png` and `docs/palette-after.png` are the same four frames
+under the old colours and the new ones.
+
 Two `MultiMeshInstance3D`s — one per species — and two draw calls at any animal
 count. Both animals are built in code (`scripts/meshes.gd`): a handful of boxes
 welded into one `ArrayMesh` each. Nothing is imported from outside this repo.
@@ -94,6 +126,44 @@ are all the same draw call.
 The **vertical of a bound is not in the shader** — it is in the instance
 transform, because a leap has to move the whole animal and cast its shadow from
 somewhere other than its feet.
+
+### The deadfall blocks were black
+
+Fixed 2026-09-11, after a phone report that the obstacle blocks rendered black
+and blinked in and out as the camera moved. Two independent faults, either of
+which produces it on its own:
+
+1. **Every box in the project was wound inside-out.** Godot's front face is the
+   clockwise winding — a correctly wound triangle has `(p1-p0) × (p2-p0)`
+   pointing *away* from its own normal, which you can confirm by measuring the
+   engine's own `BoxMesh`, and `_test_winding` does exactly that rather than
+   trusting the claim. `Meshes._box` emitted the other one, so
+   `StandardMaterial3D`'s default `cull_back` threw away every outward face of
+   every deadfall patch and drew only the far interior ones: normals pointing
+   away from the sun, hence black, and a different subset winning the depth test
+   from every angle, hence blinking. The animals were exempt for one reason —
+   `ui/animals.gdshader` is `render_mode cull_disabled`.
+2. **The slab sat flat on the floor.** Its underside was at exactly `y = 0`,
+   coplanar with the ground plane. Two coplanar surfaces 200 m from the camera
+   are a depth-precision coin toss that lands differently as the view moves.
+   `Meshes.BASE_Y` lifts it clear.
+
+Also hardened while in there: the two `MultiMeshInstance3D`s now carry an
+explicit `custom_aabb` covering the plain, so a stale batch AABB cannot cull the
+whole herd at some angle, and the sun's shadow range covers the field instead of
+stopping 100 m out.
+
+The check that keeps it fixed is `scripts/blocks.gd`, run by `./test.sh`: it
+rasterises the field from three camera angles and asserts every patch puts
+pixels on the screen, that none of them are below a brightness floor, and that
+90% of them clear 3:1 against the grass. It culls back faces **on the projected
+winding, the way the GPU does** — culling on the vertex normal would have drawn
+the broken mesh happily and proved nothing.
+
+`--legacy` rebuilds both faults so the before and after PNGs come out of one
+renderer: `docs/blocks-before.png` (30–32 of 60 triangles survive, every
+obstacle pixel below 0.12 value) and `docs/blocks-after.png` (448–450 triangles,
+98%+ clearing 3:1).
 
 ### Which way an animal points
 
@@ -117,6 +187,9 @@ is a picture:
 
 ```bash
 godot --headless --script res://scripts/preview.gd -- --preview docs/facing.png
+godot --headless --script res://scripts/preview.gd -- --legacy --preview docs/palette-before.png
+godot --headless --script res://scripts/blocks.gd -- --png docs/blocks-after.png
+godot --headless --script res://scripts/blocks.gd -- --legacy --png docs/blocks-before.png
 ```
 
 ![wolf and deer facing their travel](docs/facing.png)
@@ -136,13 +209,19 @@ asserts the mirrored lines are still the ones in it.
 
 ## Camera
 
-45° elevation looking at the herd by default.
+**Fixed** 45° elevation looking at the herd. There is no orbit.
 
-* **mouse** — left-drag orbits, right/middle-drag pans, wheel zooms
-* **touch** — one finger orbits, two fingers pinch to zoom and drag to pan
+* **mouse** — drag pans, wheel zooms
+* **touch** — one finger pans, two fingers pinch to zoom
 * **Home view** puts it back
 
-Pitch is clamped just short of straight down and just above the horizon.
+The orbit control was removed in 2026-09-11, not hidden: `PITCH` and `YAW` are
+`const` in `ui/camera.gd` and `_test_camera_is_fixed` asserts there is no orbit
+handler and that a synthetic one-finger drag pans rather than rotates. It went
+because it was the wrong control for this app on a phone — the thing worth
+watching is a chase across a 225 m plain, one finger dragging spun the world
+away from it, and that same gesture was the one people were reaching for to
+move the map.
 
 ## Parity with the canvas build
 
@@ -194,6 +273,9 @@ mode slices its trials across frames on a 9 ms budget so the tab never blocks.
 ./build.sh               # web export into dist/
 
 godot --headless --script res://scripts/preview.gd -- --preview docs/facing.png
+godot --headless --script res://scripts/preview.gd -- --legacy --preview docs/palette-before.png
+godot --headless --script res://scripts/blocks.gd -- --png docs/blocks-after.png
+godot --headless --script res://scripts/blocks.gd -- --legacy --png docs/blocks-before.png
 ```
 
 Needs Godot 4.7.2 and the matching web export templates —

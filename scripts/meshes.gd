@@ -27,7 +27,10 @@ extends RefCounted
 ## `scripts/gait.gd`, next to the displacement that consumes them.
 
 
-static func _box(st: SurfaceTool, c: Vector3, half: Vector3, swing: float, offset: float) -> void:
+## `skip` lists face indices (0:+x 1:-x 2:+y 3:-y 4:+z 5:-z) to leave out, so a
+## box can be split across two surfaces.
+static func _box(st: SurfaceTool, c: Vector3, half: Vector3, swing: float, offset: float,
+		skip: Array = []) -> void:
 	var faces := [
 		[Vector3(1, 1, 1), Vector3(1, -1, 1), Vector3(1, -1, -1), Vector3(1, 1, -1)],     # +x
 		[Vector3(-1, 1, -1), Vector3(-1, -1, -1), Vector3(-1, -1, 1), Vector3(-1, 1, 1)], # -x
@@ -36,12 +39,32 @@ static func _box(st: SurfaceTool, c: Vector3, half: Vector3, swing: float, offse
 		[Vector3(-1, 1, 1), Vector3(-1, -1, 1), Vector3(1, -1, 1), Vector3(1, 1, 1)],     # +z
 		[Vector3(1, 1, -1), Vector3(1, -1, -1), Vector3(-1, -1, -1), Vector3(-1, 1, -1)], # -z
 	]
-	for f: Array in faces:
+	for fi in range(faces.size()):
+		if skip.has(fi):
+			continue
+		var f: Array = faces[fi]
 		var p: Array = []
 		for s: Vector3 in f:
 			p.push_back(c + Vector3(s.x * half.x, s.y * half.y, s.z * half.z))
 		var n: Vector3 = (p[1] - p[0]).cross(p[2] - p[0]).normalized()
-		for tri: Array in [[0, 1, 2], [0, 2, 3]]:
+		##
+		## Godot's front face is the CLOCKWISE winding — the engine's own
+		## `BoxMesh` emits triangles whose `(p1-p0) x (p2-p0)` *opposes* the
+		## vertex normal, and `tests.gd` asserts that against a real `BoxMesh`
+		## rather than trusting this comment. The quads above are listed
+		## counter-clockwise about `n`, so they are emitted reversed.
+		##
+		## They used to be emitted `[0,1,2], [0,2,3]`, i.e. facing inward, and
+		## that is the whole of the "the deadfall blocks are black and blink
+		## when I move the camera" report: every outward face of every obstacle
+		## was culled by the default `cull_back`, leaving only the far interior
+		## faces, whose normals point away from the camera and therefore catch
+		## no sun. Which interior faces won the depth test changed with the
+		## view, so the patches flickered. The animals were exempt only because
+		## `ui/animals.gdshader` is `render_mode cull_disabled`, which is why a
+		## bug this total hid in one kind of object.
+		##
+		for tri: Array in [[0, 2, 1], [0, 3, 2]]:
 			for k: int in tri:
 				st.set_normal(n)
 				st.set_uv2(Vector2(swing, offset))
@@ -113,12 +136,41 @@ static func build(deer: bool) -> ArrayMesh:
 	return st.commit()
 
 
+##
 ## A brush patch: a slab plus a scatter of fallen trunks, deterministic in the
 ## patch index so the field looks the same every run.
+##
+## Three surfaces, not one, and that is a legibility decision: surface 0 is the
+## slab's sides, surface 1 its top cap and surface 2 the fallen trunks, so
+## `ui/field.gd` can paint the top a step lighter than the sides and the wood a
+## step darker than either. Without that a deadfall from a 45-degree camera is a
+## flat warm rectangle lying on the grass; with it, the lit top and the darker
+## sides give it a height and the trunks say what it is made of, which is what
+## the top-edge note in the brief was asking for.
+##
+## `BASE_Y` is the other half of the block fix. The slab used to sit with its
+## underside at exactly y = 0, coplanar with the ground plane, and two coplanar
+## surfaces at 225 m from the camera are a depth-precision coin toss that comes
+## up differently every time the view moves — the second, independent source of
+## the flicker, underneath the winding bug. It is now lifted clear.
+##
+const BASE_Y := 0.05
+const SLAB_H := 0.30
+
+
 static func brush(w: float, d: float, idx: int) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_box(st, Vector3(0, 0.12, 0), Vector3(w * 0.5, 0.12, d * 0.5), 0.0, 0.0)
+	var body := SurfaceTool.new()
+	body.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var top := SurfaceTool.new()
+	top.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var wood := SurfaceTool.new()
+	wood.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var slab_c := Vector3(0, BASE_Y + SLAB_H * 0.5, 0)
+	var slab_h := Vector3(w * 0.5, SLAB_H * 0.5, d * 0.5)
+	_box(body, slab_c, slab_h, 0.0, 0.0, [2])        # every face but the top
+	_box(top, slab_c, slab_h, 0.0, 0.0, [0, 1, 3, 4, 5])
+
 	var s := 7919 + idx * 104729
 	var rnd := func() -> float:
 		s = (s * 1103515245 + 12345) & 0x7FFFFFFF
@@ -131,7 +183,12 @@ static func brush(w: float, d: float, idx: int) -> ArrayMesh:
 		var half := Vector3(0.16, 0.16, ln * 0.5)
 		# a trunk lying at angle a, approximated by its axis-aligned span —
 		# the mesh is welded once and never transformed per instance
-		_box(st, Vector3(x, 0.34, z),
+		_box(wood, Vector3(x, BASE_Y + SLAB_H + 0.10, z),
 			Vector3(maxf(half.x, absf(sin(a)) * half.z), half.y, maxf(half.x, absf(cos(a)) * half.z)), 0.0, 0.0)
-	st.index()
-	return st.commit()
+	body.index()
+	top.index()
+	wood.index()
+	var mesh: ArrayMesh = body.commit()
+	top.commit(mesh)
+	wood.commit(mesh)
+	return mesh

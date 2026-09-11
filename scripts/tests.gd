@@ -15,6 +15,10 @@ const Batch := preload("res://scripts/batch.gd")
 const Rng := preload("res://scripts/rng.gd")
 const Gait := preload("res://scripts/gait.gd")
 const Field := preload("res://ui/field.gd")
+const Meshes := preload("res://scripts/meshes.gd")
+const Palette := preload("res://scripts/palette.gd")
+const Raster := preload("res://scripts/raster.gd")
+const Cam := preload("res://ui/camera.gd")
 
 var _pass := 0
 var _fail := 0
@@ -56,6 +60,10 @@ func _initialize() -> void:
 	_test_facing()
 	_test_gait_cycle()
 	_test_shader_matches_gait()
+	_test_winding()
+	_test_obstacle_geometry()
+	_test_palette_contrast()
+	_test_camera_is_fixed()
 	print("%d passed, %d failed" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)
 
@@ -523,6 +531,180 @@ func _test_shader_matches_gait() -> void:
 
 
 ## `0.5` the way GLSL source writes it, not the way `%f` does.
+##
+## The winding, against the engine's own `BoxMesh`.
+##
+## This is the assertion the deadfall bug needed and did not have. Godot's
+## front face is the CLOCKWISE winding, so a correctly wound triangle has
+## `(p1-p0) x (p2-p0)` pointing AWAY from its own vertex normal. `Meshes._box`
+## had it pointing along the normal — every box in the project was inside-out —
+## and `StandardMaterial3D`'s default `cull_back` threw the outward faces away,
+## leaving black interiors that changed with the view. The animals survived it
+## only because their shader is `cull_disabled`.
+##
+## Rather than restate the convention, ask the engine for it: build a `BoxMesh`,
+## measure its winding, and require ours to match.
+##
+func _test_winding() -> void:
+	var reference := _winding_sign(BoxMesh.new().get_mesh_arrays())
+	ok(reference == -1, "BoxMesh is wound against its normals (got %d)" % reference)
+	for m: Dictionary in [
+			{"n": "wolf", "m": Meshes.build(false)},
+			{"n": "deer", "m": Meshes.build(true)},
+			{"n": "brush", "m": Meshes.brush(24.0, 18.0, 0)}]:
+		var mesh: ArrayMesh = m["m"]
+		for si in range(mesh.get_surface_count()):
+			ok(_winding_sign(mesh.surface_get_arrays(si)) == reference,
+				"%s surface %d winds like BoxMesh" % [m["n"], si])
+
+	##
+	## And the other half: the rasteriser that draws the headless PNGs has to
+	## cull the same faces the GPU culls, or the picture proves nothing. Project
+	## a BoxMesh and check that the triangles whose normals face the eye are
+	## exactly the ones with `Raster.FRONT_SIGN` screen area.
+	##
+	var arrays := BoxMesh.new().get_mesh_arrays()
+	var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var nn: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	var idx: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	var eye := Vector3(6, 4, 7)
+	var inv := Raster.view(eye, Vector3.ZERO)
+	var agree := 0
+	for t in range(0, idx.size(), 3):
+		var p: Array = []
+		for k in range(3):
+			var c: Vector3 = inv * v[idx[t + k]]
+			p.push_back(Vector2(c.x / -c.z, -c.y / -c.z))
+		var area: float = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[1].y - p[0].y) * (p[2].x - p[0].x)
+		var toward: bool = nn[idx[t]].dot(eye - v[idx[t]]) > 0.0
+		if toward == (area * Raster.FRONT_SIGN > 0.0):
+			agree += 1
+	ok(agree == idx.size() / 3,
+		"Raster.FRONT_SIGN culls what the GPU culls (%d/%d)" % [agree, idx.size() / 3])
+
+
+## -1 if `(p1-p0) x (p2-p0)` opposes the vertex normal on every triangle,
+## +1 if it agrees on every one, 0 if the surface is inconsistent.
+func _winding_sign(arrays: Array) -> int:
+	var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var n: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	var idx: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	var seen := 0
+	for t in range(0, idx.size(), 3):
+		var a := idx[t]
+		var face: Vector3 = (v[idx[t + 1]] - v[a]).cross(v[idx[t + 2]] - v[a])
+		if face.length() < 1e-9:
+			continue
+		var sgn := 1 if face.normalized().dot(n[a]) > 0.0 else -1
+		if seen == 0:
+			seen = sgn
+		elif seen != sgn:
+			return 0
+	return seen
+
+
+##
+## The second cause of the flicker: the slab used to sit with its underside at
+## exactly y = 0, coplanar with the ground plane, and coplanar surfaces 200 m
+## from a camera are a depth-precision coin toss that resolves differently as
+## the view moves. It has to be clear of the floor, and it has to have a top
+## cap on its own surface so the top edge can be painted lighter than the sides.
+##
+func _test_obstacle_geometry() -> void:
+	var mesh := Meshes.brush(24.0, 18.0, 0)
+	ok(mesh.get_surface_count() == 3, "brush has sides, cap and trunks as separate surfaces")
+	var aabb := mesh.get_aabb()
+	ok(aabb.position.y > 0.02, "the slab is clear of the ground plane (base y = %.3f)" % aabb.position.y)
+	ok(Meshes.BASE_Y > 0.0, "Meshes.BASE_Y is positive")
+	# the cap is a flat lid at the top of the slab and nothing else
+	var cap := mesh.surface_get_arrays(1)[Mesh.ARRAY_VERTEX] as PackedVector3Array
+	var flat := true
+	for p in cap:
+		if absf(p.y - (Meshes.BASE_Y + Meshes.SLAB_H)) > 1e-5:
+			flat = false
+	ok(flat, "surface 1 is the top cap, all at one height")
+
+
+##
+## Legibility, as a number. Every element a viewer has to pick out has to clear
+## WCAG 3:1 — the bar for non-text graphical objects — against the ground it
+## sits on, at every fatigue level it can reach.
+##
+func _test_palette_contrast() -> void:
+	var bar := 3.0
+	for e: Array in [
+			["wolf", Palette.WOLF], ["wolf spent", Palette.WOLF_SPENT],
+			["deer", Palette.DEER], ["deer spent", Palette.DEER_SPENT],
+			["deadfall", Palette.OBSTACLE], ["deadfall top", Palette.OBSTACLE_TOP],
+			["goal strip", Palette.GOAL]]:
+		var k: float = Palette.contrast(e[1], Palette.GROUND)
+		ok(k >= bar, "%s is %.2f:1 against the ground (bar %.1f)" % [e[0], k, bar])
+
+	# the whole fatigue ramp, not just its ends — `coat` must never dip under
+	for i in range(21):
+		var t := float(i) / 20.0
+		var w: float = Palette.contrast(Palette.coat(Palette.WOLF, Palette.WOLF_SPENT, t), Palette.GROUND)
+		var d: float = Palette.contrast(Palette.coat(Palette.DEER, Palette.DEER_SPENT, t), Palette.GROUND)
+		ok(w >= bar, "wolf at fatigue %.2f is %.2f:1" % [t, w])
+		ok(d >= bar, "deer at fatigue %.2f is %.2f:1" % [t, d])
+
+	# and the two species have to be separable from each other, on hue if not
+	# on luminance — a grey wolf and a tan deer, not two browns
+	var hw := Palette.WOLF.h
+	var hd := Palette.DEER.h
+	ok(Palette.WOLF.s < 0.12, "the wolf is neutral (saturation %.3f)" % Palette.WOLF.s)
+	ok(Palette.DEER.s > 0.45, "the deer is warm (saturation %.3f)" % Palette.DEER.s)
+	ok(absf(hw - hd) > 0.02 or Palette.DEER.s - Palette.WOLF.s > 0.3,
+		"wolf and deer separate on saturation/hue")
+
+	# the constants file is the only place colours live: no literal Color(...)
+	# with three or four numbers anywhere in the draw code
+	for f: String in ["ui/field.gd", "ui/main.gd", "ui/camera.gd"]:
+		var src := FileAccess.get_file_as_string("res://" + f)
+		var re := RegEx.create_from_string("Color\\(\\s*[0-9]")
+		var hits := []
+		for m in re.search_all(src):
+			var line := src.count("\n", 0, m.get_start()) + 1
+			# the MultiMesh custom-data channel is a Color by type, not by
+			# intent; so is the scrim, which is pure black at an alpha
+			var ctx := src.substr(maxi(0, m.get_start() - 120), 200)
+			if ctx.contains("set_instance_custom_data") or ctx.contains("_scrim.color"):
+				continue
+			hits.push_back(line)
+		ok(hits.is_empty(), "%s has no literal colours (lines %s)" % [f, str(hits)])
+
+
+##
+## The camera is fixed at 45 degrees and there is no way to change that.
+##
+## The brief said "remove orbit entirely, don't just hide it", so the assertion
+## is structural rather than behavioural: the elevation and heading are `const`,
+## the script exposes no orbit entry point, and a synthetic one-finger drag pans
+## instead of spinning.
+##
+func _test_camera_is_fixed() -> void:
+	var src := FileAccess.get_file_as_string("res://ui/camera.gd")
+	ok(src.contains("const PITCH"), "pitch is a constant")
+	ok(src.contains("const YAW"), "yaw is a constant")
+	ok(not src.contains("func _orbit"), "there is no orbit handler")
+	ok(not src.contains("var yaw"), "yaw is not a variable")
+	ok(not src.contains("var pitch"), "pitch is not a variable")
+	near(Cam.PITCH, deg_to_rad(45.0), 1e-9, "the camera sits at 45 degrees")
+
+	var cam: Camera3D = Cam.new()
+	cam.setup(Vector3(112.0, 0.0, 65.0), 150.0)
+	var before: Vector3 = cam.position - cam.target
+	var drag := InputEventScreenDrag.new()
+	drag.index = 0
+	drag.position = Vector2(400, 300)
+	drag.relative = Vector2(60, -40)
+	cam._unhandled_input(drag)
+	var after: Vector3 = cam.position - cam.target
+	near(before.angle_to(after), 0.0, 1e-6, "a one-finger drag does not rotate the view")
+	ok(cam.target.distance_to(Vector3(112.0, 0.0, 65.0)) > 0.01, "a one-finger drag pans")
+	cam.free()
+
+
 func _glsl_float(v: float) -> String:
 	var s := "%.2f" % v
 	while s.ends_with("0") and not s.ends_with(".0"):
